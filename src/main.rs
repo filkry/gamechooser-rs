@@ -14,6 +14,9 @@ IMPROVEMENT IDEAS:
     + abandon changes without crashing during each subcommand
 */
 
+type DynError = Box<dyn std::error::Error>;
+
+#[derive(Debug)]
 struct SGameRecord {
     id: u32,
     title: String,
@@ -21,15 +24,19 @@ struct SGameRecord {
     via: String,
     play_more: bool,
     passes: u16,
-    next_valid_date: Date<Utc>,
+    next_valid_date: Option<NaiveDate>,
 
     eternal: Option<bool>,
     linux: Option<bool>,
     couch: Option<bool>,
 }
 
+fn parse_bool_int(s: &str) -> Option<bool> {
+    s.parse::<u16>().ok().map(|intval| intval > 0)
+}
+
 impl SGameRecord {
-    fn new(column_map: &SGameRecordColumnMap, csv_record: &csv::StringRecord) -> Result<Self, Box<dyn std::error::Error>> {
+    fn new(column_map: &SGameRecordColumnMap, csv_record: csv::StringRecord) -> Result<Self, DynError> {
         // -- unwrap here because we know how many columns our CSV has from the column_map
         Ok(Self{
             id: csv_record.get(column_map.id_column).unwrap().parse::<u32>()?,
@@ -38,12 +45,10 @@ impl SGameRecord {
             via: String::from(csv_record.get(column_map.via_column).unwrap()),
             play_more: csv_record.get(column_map.play_more_column).unwrap().parse::<u16>()? > 0,
             passes: csv_record.get(column_map.passes_column).unwrap().parse::<u16>()?,
-            // $$$FRK(TODO): parse date
-            next_valid_date: panic!(),
-            // $$$FRK(TODO): use Option.map() here to do the parse and comparison
-            eternal: csv_record.get(column_map.eternal_column).unwrap().parse::<u16>()? > 0,
-            linux: csv_record.get(column_map.linux_column).unwrap().parse::<u16>()? > 0,
-            couch: csv_record.get(column_map.couch_column).unwrap().parse::<u16>()? > 0,
+            next_valid_date: NaiveDate::parse_from_str(csv_record.get(column_map.next_valid_date_column).unwrap(), "%Y-%m-%d").ok(),
+            eternal: parse_bool_int(csv_record.get(column_map.eternal_column).unwrap()),
+            linux: parse_bool_int(csv_record.get(column_map.linux_column).unwrap()),
+            couch: parse_bool_int(csv_record.get(column_map.couch_column).unwrap()),
         })
     }
 }
@@ -62,7 +67,7 @@ struct SGameRecordColumnMap {
 }
 
 impl SGameRecordColumnMap {
-    fn new<R: std::io::Read>(reader: &mut csv::Reader<R>) -> Result<Self, Box<dyn std::error::Error>> {
+    fn new<R: std::io::Read>(reader: &mut csv::Reader<R>) -> Result<Self, DynError> {
         let mut id_column = None;
         let mut title_column = None;
         let mut release_year_column = None;
@@ -80,10 +85,10 @@ impl SGameRecordColumnMap {
                 "title" => title_column = Some(i),
                 "release_year" => release_year_column = Some(i),
                 "via" => via_column = Some(i),
-                "play_more" => play_more = Some(i),
+                "play_more" => play_more_column = Some(i),
                 "passes" => passes_column = Some(i),
                 "next_valid_date" => next_valid_date_column = Some(i),
-                "external" => eternal_column = Some(i),
+                "eternal" => eternal_column = Some(i),
                 "linux" => linux_column = Some(i),
                 "couch" => couch_column = Some(i),
                 _ => (),
@@ -110,11 +115,109 @@ struct SOwnRecord {
     own_type: String,
 }
 
+impl SOwnRecord {
+    fn new(column_map: &SOwnRecordColumnMap, csv_record: csv::StringRecord) -> Result<Self, DynError> {
+        // -- unwrap here because we know how many columns our CSV has from the column_map
+        Ok(Self{
+            game_id: csv_record.get(column_map.game_id_column).unwrap().parse::<u32>()?,
+            own_type: String::from(csv_record.get(column_map.own_type_column).unwrap()),
+        })
+    }
+}
+
+struct SOwnRecordColumnMap {
+    game_id_column: usize,
+    own_type_column: usize,
+}
+
+impl SOwnRecordColumnMap {
+    fn new<R: std::io::Read>(reader: &mut csv::Reader<R>) -> Result<Self, DynError> {
+        let mut game_id_column = None;
+        let mut own_type_column = None;
+
+        for (i, header) in reader.headers()?.iter().enumerate() {
+            match header {
+                "game_id" => game_id_column = Some(i),
+                "storefront" => own_type_column = Some(i), // legacy support
+                "own_type" => own_type_column = Some(i),
+                _ => (),
+            }
+        }
+
+        Ok(Self {
+            game_id_column: game_id_column.ok_or("_game.csv is missing column 'game_id'")?,
+            own_type_column: own_type_column.ok_or("_game.csv is missing column 'own_type' or 'storefront'")?,
+        })
+    }
+}
+
 struct SSessionRecord {
     game_id: u32,
-    started_date: Date<Utc>,
-    finished_date: Date<Utc>,
+    started_date: Option<NaiveDate>,
+    finished_date: Option<NaiveDate>,
     notable: Option<bool>,
+}
+
+fn parse_notable(s: &str) -> Option<bool> {
+    match s {
+        "transient" => Some(false),
+        "stuck" => Some(true),
+        _ => {
+            match s.parse::<u16>() {
+                Ok(intval) => Some(intval > 0),
+                Err(_) => None,
+            }
+        },
+    }
+}
+
+impl SSessionRecord {
+    fn new(column_map: &SSessionRecordColumnMap, csv_record: csv::StringRecord) -> Result<Self, DynError> {
+        // -- unwrap here because we know how many columns our CSV has from the column_map
+        Ok(Self{
+            game_id: csv_record.get(column_map.game_id_column).unwrap().parse::<u32>()?,
+            started_date: NaiveDate::parse_from_str(csv_record.get(column_map.started_date_column).unwrap(), "%Y-%m-%d").ok(),
+            finished_date: column_map.finished_date_column.and_then(|column| {
+                NaiveDate::parse_from_str(csv_record.get(column).unwrap(), "%Y-%m-%d").ok()
+            }),
+            notable: parse_notable(csv_record.get(column_map.notable_column).unwrap()),
+        })
+    }
+}
+
+struct SSessionRecordColumnMap {
+    game_id_column: usize,
+    started_date_column: usize,
+    finished_date_column: Option<usize>,
+    notable_column: usize,
+}
+
+impl SSessionRecordColumnMap {
+    fn new<R: std::io::Read>(reader: &mut csv::Reader<R>) -> Result<Self, DynError> {
+        let mut game_id_column = None;
+        let mut started_date_column = None;
+        let mut finished_date_column = None;
+        let mut notable_column = None;
+
+        for (i, header) in reader.headers()?.iter().enumerate() {
+            match header {
+                "game_id" => game_id_column = Some(i),
+                "started" => started_date_column = Some(i), // legacy support
+                "started_date" => started_date_column = Some(i),
+                "finished_date" => finished_date_column = Some(i),
+                "outcome" => notable_column = Some(i), // legacy support
+                "notable" => notable_column = Some(i),
+                _ => (),
+            }
+        }
+
+        Ok(Self {
+            game_id_column: game_id_column.ok_or("_game.csv is missing column 'game_id'")?,
+            started_date_column: started_date_column.ok_or("_game.csv is missing column 'started_date' or 'started'")?,
+            finished_date_column,
+            notable_column: notable_column.ok_or("_game.csv is missing column 'notable' or 'outcome'")?,
+        })
+    }
 }
 
 struct SDB {
@@ -126,23 +229,60 @@ struct SDB {
 }
 
 impl SDB {
-    fn load(data_directory: String) -> Result<Self, Box<dyn std::error::Error>> {
-        let mut path_buf = std::path::PathBuf::new();
-        path_buf.push(data_directory);
-        path_buf.push("_game.csv");
-        println!("game csv: {:?}", path_buf);
+    fn load(data_directory: String) -> Result<Self, DynError> {
+        let mut games : Vec<SGameRecord> = Vec::new();
+        let mut ownership : Vec<SOwnRecord> = Vec::new();
+        let mut sessions : Vec<SSessionRecord> = Vec::new();
 
-        let mut games_reader = csv::Reader::from_path(path_buf).unwrap();
-        let games_column_map = SGameRecordColumnMap::new(&mut games_reader);
-        for result in games_reader.records() {
-            for (i, entry) in result?.iter().enumerate() {
-                if games_column_map.id_column == i {
+        {
+            let mut path_buf = std::path::PathBuf::new();
+            path_buf.push(&data_directory);
+            path_buf.push("_game.csv");
 
-                }
+            let mut games_reader = csv::Reader::from_path(path_buf).unwrap();
+            let games_column_map = SGameRecordColumnMap::new(&mut games_reader)?;
+            for result in games_reader.records() {
+                games.push(SGameRecord::new(&games_column_map, result?)?);
             }
         }
 
-        panic!();
+        {
+            let mut path_buf = std::path::PathBuf::new();
+            path_buf.push(&data_directory);
+            path_buf.push("_own.csv");
+
+            let mut own_reader = csv::Reader::from_path(path_buf).unwrap();
+            let own_column_map = SOwnRecordColumnMap::new(&mut own_reader)?;
+            for result in own_reader.records() {
+                ownership.push(SOwnRecord::new(&own_column_map, result?)?);
+            }
+        }
+
+        {
+            let mut path_buf = std::path::PathBuf::new();
+            path_buf.push(&data_directory);
+            path_buf.push("_session.csv");
+
+            let mut session_reader = csv::Reader::from_path(path_buf).unwrap();
+            let session_column_map = SSessionRecordColumnMap::new(&mut session_reader)?;
+            for result in session_reader.records() {
+                sessions.push(SSessionRecord::new(&session_column_map, result?)?);
+            }
+        }
+
+        let mut next_id = 0;
+        for game in &games {
+            if game.id > next_id {
+                next_id = game.id + 1;
+            }
+        }
+
+        Ok(Self {
+            games,
+            ownership,
+            sessions,
+            next_id,
+        })
     }
 }
 
@@ -188,7 +328,11 @@ fn parse_data_directory() -> String {
 }
 
 fn handle_add(data_directory: String, cli_matches: &clap::ArgMatches) {
-    let _ = SDB::load(data_directory).unwrap();
+    let dberr = SDB::load(data_directory);
+    if let Err(e) = dberr {
+        eprintln!("Unable to load database, error message '{:?}'", e);
+        return;
+    }
 
     let title : String = input().msg("Game title: ").get();
 
