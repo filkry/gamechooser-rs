@@ -8,6 +8,8 @@ edition = "2018"
 
 [dependencies]
 configparser = "2.0.0"
+chrono = "0.4"
 clap = "2.33.3"
+csv = "1.1"
 dirs = "3.0.1"
 read_input = "0.8.4"
